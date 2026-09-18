@@ -106,6 +106,29 @@ def test_registration_error_detection():
 
 # ---- stdout guard -------------------------------------------------------
 
+def test_all_tools_and_prompt_register():
+    # Import-and-register smoke: no IronCAD needed. Guards against wiring breakage.
+    import asyncio
+
+    from ironcad_mcp.server import mcp
+
+    tools = {t.name for t in asyncio.run(mcp.list_tools())}
+    expected = {
+        "ironcad_status", "ironcad_attach", "ironcad_get_active_doc_info",
+        "ironcad_list_parts", "ironcad_describe_part", "ironcad_get_selection",
+        "ironcad_get_anchor",
+        "ironcad_capture_view", "ironcad_list_catalogs", "ironcad_list_catalog_parts",
+        "ironcad_get_catalog_part_info", "ironcad_add_catalog_part",
+        "ironcad_build_parts",
+        "ironcad_set_part_parameter", "ironcad_move_part", "ironcad_set_anchor",
+        "ironcad_connect_parts",
+        "ironcad_save", "ironcad_save_copy", "ironcad_execute_api_script",
+    }
+    assert expected <= tools, f"missing tools: {expected - tools}"
+    prompts = {p.name for p in asyncio.run(mcp.list_prompts())}
+    assert "build_from_sketch" in prompts
+
+
 def test_redirect_stdout_to_stderr_object_fallback(monkeypatch, capsys):
     # Under pytest capture, fds may be unavailable; the object-level fallback
     # must still keep writes off stdout.

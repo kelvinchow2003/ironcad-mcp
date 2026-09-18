@@ -25,6 +25,12 @@ _TYPE_NAMES = {1: "part", 2: "assembly"}
 # ExportImage eFormat (API_NOTES §2): JPEG is the one Claude can read.
 _EXPORT_JPEG = 3
 
+# eZAnchorBehavior names (API_NOTES §9b).
+_ANCHOR_BEHAVIOR_NAMES = {
+    0: "move_freely", 1: "fixed_position",
+    2: "attached_to_surface", 3: "slide_along_surface",
+}
+
 
 def _type_name(t: Any) -> str:
     try:
@@ -62,6 +68,22 @@ def _position_xyz(state, element: Any) -> Optional[list]:
     try:
         se = state.scene_element(element)
         return [float(se.PositionTransformComponentValue[t]) for t in range(3)]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _anchor_info(state, element: Any) -> Optional[dict]:
+    """Read a part's anchor: local [x,y,z] (metres) + behavior (API_NOTES §9b)."""
+    try:
+        se = state.scene_element(element)
+        xyz = [float(se.AnchorTransformComponentValue[t]) for t in range(3)]
+        code = None
+        try:
+            code = int(se.AnchorBehavior)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"anchor_xyz_m": xyz, "behavior": code,
+                "behavior_name": _ANCHOR_BEHAVIOR_NAMES.get(code)}
     except Exception:  # noqa: BLE001
         return None
 
@@ -153,8 +175,37 @@ def register(mcp) -> None:  # noqa: ANN001
             el = chosen.obj
             summary = _element_summary(state, el, chosen.index)
             summary["position_xyz_m"] = _position_xyz(state, el)
+            summary["anchor"] = _anchor_info(state, el)
             summary["parameters"] = _parameter_names(state, el)
             return summary
+
+        try:
+            return await run_on_com(work)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc), "name": name}
+
+    @mcp.tool()
+    async def ironcad_get_anchor(name: str, index: Optional[int] = None) -> dict:
+        """Read a part's ANCHOR (the blue/white sphere), by NAME (index fallback).
+
+        Returns {name, anchor_xyz_m (local), behavior, behavior_name}. The anchor
+        is the point IronCAD places/snaps the part by; behavior is one of
+        move_freely(0)/fixed_position(1)/attached_to_surface(2)/slide_along_surface(3).
+        Read-only. Use with ironcad_set_anchor to control snapping.
+        """
+        state = get_state()
+
+        def work():
+            items = []
+            for i, el in enumerate(state.iter_top_elements()):
+                try:
+                    nm = str(el.Name)
+                except Exception:  # noqa: BLE001
+                    nm = f"<element {i}>"
+                items.append(NamedItem(i, nm, el))
+            chosen = resolve_by_name(items, name, index_fallback=index)
+            info = _anchor_info(state, chosen.obj) or {}
+            return {"name": chosen.name, **info}
 
         try:
             return await run_on_com(work)

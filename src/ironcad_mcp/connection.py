@@ -57,6 +57,7 @@ class ConnectionState:
     base: Any = None                   # IZBaseApp
     connected: bool = False
     api_registered: Optional[bool] = None
+    silent_mode: Optional[bool] = None
     last_error: Optional[str] = None
     ironcad_version: str = "2024 (v26.0)"
     _pi: Any = field(default=None, repr=False)      # python_ironcad module
@@ -106,6 +107,7 @@ class ConnectionState:
             self.api_registered = True
             self.connected = True
             _logger.info("Attached; IZBaseApp resolved via QueryInterface")
+            self._enable_silent_mode()
         except Exception as exc:  # noqa: BLE001
             self.base = None
             self.connected = False
@@ -117,6 +119,23 @@ class ConnectionState:
                 self.last_error = f"QueryInterface(IZBaseApp) failed: {exc}"
                 _logger.exception("Unexpected IZBaseApp QI failure")
         return self.status()
+
+    # ---- silent mode (suppress modal dialogs) --------------------------
+
+    def _enable_silent_mode(self) -> None:
+        """Turn on IZBaseAppSetups.SilentMode so automation never blocks on a
+        modal dialog (which would irrecoverably wedge the STA COM thread).
+
+        Best-effort: never fails the attach if unavailable.
+        """
+        try:
+            setups = self.app.QueryInterface(self._icapi.IZBaseAppSetups)
+            setups.SilentMode = True
+            self.silent_mode = True
+            _logger.info("SilentMode enabled (modal dialogs suppressed)")
+        except Exception as exc:  # noqa: BLE001
+            self.silent_mode = False
+            _logger.warning("Could not enable SilentMode: %s", exc)
 
     # ---- helpers (run on COM thread) -----------------------------------
 
@@ -200,6 +219,7 @@ class ConnectionState:
         return {
             "connected": bool(self.connected),
             "api_registered": self.api_registered,
+            "silent_mode": self.silent_mode,
             "active_doc_name": active_name,
             "ironcad_version": self.ironcad_version if self.connected else None,
             "catalogs_loaded": catalogs_loaded,

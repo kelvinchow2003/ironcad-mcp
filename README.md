@@ -12,14 +12,27 @@ catalog.
 > machine- and session-local). Viewing that machine over RDP/TeamViewer is fine;
 > it is not part of Claude's path to IronCAD.
 
-## Status
+## Status — M0–M5 complete, verified against live IronCAD 2024
 
-- ✅ **M0 scaffold** — package, pinned deps, stderr logging, STA COM worker,
-  stdout guard (verified: 0 bytes leak to stdout), `ironcad_status` /
-  `ironcad_attach`.
-- ⏳ **M1 discovery** — `scripts/discover_api.py` ready; **blocked on the
-  one-time COM registration below**. See `API_NOTES.md`.
-- ⛔ M2–M5 — after M1.
+- ✅ **M0** scaffold, STA COM worker, stdout guard (0-byte leak verified).
+- ✅ **M1** discovery — every priority target resolved with live snippets
+  (`API_NOTES.md`); `scripts/discover_api.py` reproduces it.
+- ✅ **M2** read tools — status/attach/doc-info/list/describe/selection/capture-view.
+- ✅ **M3** catalog tools — list/list-parts/info + **`ironcad_add_catalog_part`**
+  (instantiate by name; backup-first). Verified: placed & positioned real parts.
+- ✅ **M4** edit/save — set-parameter, move (matrix), save/save-copy, read-only
+  gating, escape hatch. **SilentMode** suppresses modal dialogs (see below).
+- ✅ **M5** `build_from_sketch` MCP prompt (plan → confirm → build → verify → save).
+
+**16 tools** + 1 prompt; 12 mock unit tests. See `tests/MANUAL_TEST.md` for the
+live verification log.
+
+### Dialog safety (SilentMode)
+
+On attach the server sets `IZBaseAppSetups.SilentMode = True`. IronCAD modal
+dialogs would otherwise freeze the single COM worker thread irrecoverably; with
+SilentMode they are suppressed so automation never blocks. `ironcad_status`
+reports `silent_mode`.
 
 ## Prerequisites
 
