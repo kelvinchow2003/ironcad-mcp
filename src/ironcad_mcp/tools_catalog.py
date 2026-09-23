@@ -367,7 +367,15 @@ def register(mcp) -> None:  # noqa: ANN001
           * `position` = an absolute [x,y,z] in metres. Only used when
             `relative_to` is not given. Guessing absolutes is discouraged.
 
-        `instance_name` optionally renames the created element. `parameters` is an
+        `instance_name` optionally renames the created element — AVOID this for
+        stock/BOM parts (e.g. PIL4040SNN_): IronCAD auto-derives the element's
+        Name from its real geometry on insert/cut (PIL4040SNN_ -> PIL4040SNN500,
+        or PIL4040SNN420 after a Boolean cut) and the BOM is built from that
+        name; overwriting it breaks the BOM entry PERMANENTLY — verified live
+        that it does not come back even after RegenerateParts. Only use
+        `instance_name` for elements that aren't meant to be individually
+        BOM-tracked (e.g. an assembly/grouping node), or reference parts by
+        `id`/position instead of renaming them. `parameters` is an
         optional {param_name: value} map applied in the SAME call (saves a
         round-trip vs. ironcad_set_part_parameter). `rotation_deg` is an optional
         [rx,ry,rz] rotation (degrees about X,Y,Z) applied before positioning —
@@ -428,6 +436,17 @@ def register(mcp) -> None:  # noqa: ANN001
            offset? ([dx,dy,dz] metres), position? ([x,y,z] abs metres, fallback),
            rotation_deg? ([rx,ry,rz] degrees about X,Y,Z — orient extrusions),
            parameters? ({param_name: value})}
+
+        CAUTION — `instance_name` vs. BOM naming: for stock/BOM catalog parts
+        (e.g. PIL4040SNN_) IronCAD auto-derives the element's Name from its
+        real geometry on insert/cut (PIL4040SNN_ -> PIL4040SNN500, or
+        PIL4040SNN420 after a Boolean cut) and the BOM is built from that
+        name; setting `instance_name` overwrites it and the BOM entry is lost
+        PERMANENTLY (does not come back even after a regenerate). Only set
+        `instance_name` when you specifically need to `relative_to`-reference
+        that part later in the SAME batch (duplicate default stock names are
+        ambiguous for name resolution) or don't care about its BOM identity —
+        otherwise leave it unset and let the part keep its auto BOM name.
 
         Order matters: a part may be placed `relative_to` a part created earlier
         in the same list. Per-item failures are captured and reported without

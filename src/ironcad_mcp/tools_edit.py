@@ -131,6 +131,89 @@ def register(mcp) -> None:  # noqa: ANN001
             return {"error": str(exc), "name": name, "param": param}
 
     @mcp.tool()
+    async def ironcad_set_extrude_length(
+        name: str, length_m: float, index: Optional[int] = None, backward: bool = False,
+    ) -> dict:
+        """Set a part's REAL extrude length directly, to ANY size (WRITE).
+
+        For stock catalog parts whose length looks "fixed" at insert (e.g.
+        PIL4040SNN_ always inserts at 500mm) — that 500mm is NOT a hard limit,
+        it's just the catalog's default `ExtrudeDistance`. Verified live
+        2026-09-19: the part's first child feature (`element.GetFirstChild()`,
+        typically named "Block") QIs to `IZExtrudeFeature`, whose
+        `ExtrudeDistance[Z_EXTRUDE_DIRECTION_FORWARD]` is directly settable to
+        ANY length (tested 50mm to 2500mm+) — no Boolean-cut or multi-segment
+        splicing needed. The element's `.Name` auto-updates to match the new
+        real length (BOM-correct: `PIL4040SNN500` -> `PIL4040SNN1076.8` etc.),
+        exactly like a cut does — so this is BOM-safe, unlike renaming.
+
+        `backward=True` grows/shrinks from the other end (Z_EXTRUDE_DIRECTION_
+        BACKWARD) instead of forward — use if the part's sketch plane is at the
+        far end for a given part family (check bbox after; not all families
+        necessarily support both directions symmetrically, untested).
+
+        Resolves by NAME (index fallback). Requires read_write mode; backs up
+        first. Refuses if the resolved element has no `Block`-style extrude
+        feature as its first child (e.g. an assembly, or a part built some
+        other way) — try `ironcad_set_part_parameter` for those instead.
+        Returns {name (new BOM name), old_length_m, new_length_m, dims_m}.
+        """
+        state = get_state()
+
+        def work():
+            require_write_mode("ironcad_set_extrude_length")
+            backup_path = backup_active_doc(state.active_doc_name())
+            chosen = _resolve_top_element(state, name, index)
+            el = chosen.obj
+            try:
+                block = el.GetFirstChild()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"'{chosen.name}' has no child feature to edit: {exc}"
+                ) from exc
+            if block is None:
+                raise RuntimeError(f"'{chosen.name}' has no first child feature.")
+            try:
+                ef = block.QueryInterface(state.ICAPI.IZExtrudeFeature)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"'{chosen.name}'.GetFirstChild() ('{getattr(block, 'Name', '?')}') "
+                    f"is not an extrude feature: {exc}"
+                ) from exc
+            dir_code = 1 if backward else 0  # Z_EXTRUDE_DIRECTION_BACKWARD/FORWARD
+            old = None
+            try:
+                old = float(ef.ExtrudeDistance(dir_code))
+            except Exception:  # noqa: BLE001
+                pass
+            ef.ExtrudeDistance[dir_code] = float(length_m)
+            part = el.QueryInterface(state.ICAPI.IZPart)
+            part.Regenerate()
+            new = None
+            try:
+                new = float(ef.ExtrudeDistance(dir_code))
+            except Exception:  # noqa: BLE001
+                pass
+            dims = None
+            try:
+                bb = part.GetBoundingBox(False)
+                dims = [round(bb[k + 3] - bb[k], 6) for k in range(3)]
+            except Exception:  # noqa: BLE001
+                pass
+            new_name = None
+            try:
+                new_name = str(el.Name)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"name": new_name or chosen.name, "old_length_m": old,
+                    "new_length_m": new, "dims_m": dims, "backup_path": backup_path}
+
+        try:
+            return await run_on_com(work)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc), "name": name}
+
+    @mcp.tool()
     async def ironcad_move_part(
         name: str,
         position: Optional[list] = None,

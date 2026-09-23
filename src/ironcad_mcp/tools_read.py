@@ -88,6 +88,66 @@ def _anchor_info(state, element: Any) -> Optional[dict]:
         return None
 
 
+def _bbox_list(part) -> Optional[list]:
+    """Return [minx,miny,minz,maxx,maxy,maxz] from IZPart.GetBoundingBox (global)."""
+    try:
+        v = part.GetBoundingBox(False)  # False = global space
+        return [float(x) for x in v]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _element_bbox(state, element: Any) -> Optional[list]:
+    """Global AABB for an element, via QI IZPart. None if not a part/no bbox."""
+    try:
+        part = element.QueryInterface(state.ICAPI.IZPart)
+    except Exception:  # noqa: BLE001
+        return None
+    return _bbox_list(part)
+
+
+def _iter_leaf_parts(state, element: Any, depth: int = 0):
+    """Yield (name, element, bbox) for every leaf PART under `element` (recursing
+    into assemblies). Assemblies themselves don't QI to IZPart, so we recurse."""
+    bb = _element_bbox(state, element)
+    if bb is not None:
+        try:
+            nm = str(element.Name)
+        except Exception:  # noqa: BLE001
+            nm = "<part>"
+        yield (nm, element, bb)
+        return
+    if depth > 12:
+        return
+    kids = None
+    try:
+        kids = element.GetChildren()
+    except Exception:  # noqa: BLE001
+        kids = None
+    if not kids:
+        return
+    try:
+        iterator = list(kids)
+    except TypeError:
+        return
+    for k in iterator:
+        yield from _iter_leaf_parts(state, k, depth + 1)
+
+
+def _aabb_overlap(a: list, b: list, tol: float):
+    """Overlap box dims of two AABBs [minx..maxz]; None if they don't overlap
+    by more than `tol` on every axis. Returns [ox,oy,oz] overlap extents."""
+    ov = []
+    for k in range(3):
+        lo = max(a[k], b[k])
+        hi = min(a[k + 3], b[k + 3])
+        d = hi - lo
+        if d <= tol:
+            return None
+        ov.append(round(d, 6))
+    return ov
+
+
 def _parameter_names(state, element: Any) -> list:
     names = []
     try:
@@ -211,6 +271,96 @@ def register(mcp) -> None:  # noqa: ANN001
             return await run_on_com(work)
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc), "name": name}
+
+    @mcp.tool()
+    async def ironcad_get_part_bbox(name: str, index: Optional[int] = None) -> dict:
+        """Read a part's bounding box (dimensions + extents), by NAME.
+
+        Use this to MEASURE geometry and place parts by CALCULATION instead of
+        screenshots: e.g. read a profile's cross-section (a 40x40 extrusion reports
+        dims ~[0.04,0.04,L]) and its min/max corners, then compute exact offsets so
+        parts butt instead of interpenetrating.
+
+        Returns {name, dims_m:[dx,dy,dz], min_m:[x,y,z], max_m:[x,y,z],
+        center_m:[x,y,z]} in GLOBAL metres. Read-only.
+        """
+        state = get_state()
+
+        def work():
+            items = []
+            for i, el in enumerate(state.iter_top_elements()):
+                try:
+                    nm = str(el.Name)
+                except Exception:  # noqa: BLE001
+                    nm = f"<element {i}>"
+                items.append(NamedItem(i, nm, el))
+            chosen = resolve_by_name(items, name, index_fallback=index)
+            bb = _element_bbox(state, chosen.obj)
+            if bb is None:
+                raise RuntimeError(
+                    f"No bounding box for '{chosen.name}' (not a part, or geometry "
+                    f"not available)."
+                )
+            dims = [round(bb[k + 3] - bb[k], 6) for k in range(3)]
+            center = [round((bb[k] + bb[k + 3]) / 2.0, 6) for k in range(3)]
+            return {"name": chosen.name,
+                    "dims_m": dims,
+                    "min_m": [round(bb[k], 6) for k in range(3)],
+                    "max_m": [round(bb[k + 3], 6) for k in range(3)],
+                    "center_m": center}
+
+        try:
+            return await run_on_com(work)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc), "name": name}
+
+    @mcp.tool()
+    async def ironcad_check_interference(tolerance_mm: float = 0.5) -> dict:
+        """Report parts whose solid bodies OVERLAP (interpenetrate), by CALCULATION.
+
+        Computes pairwise axis-aligned bounding-box overlaps for every part in the
+        scene (recursing into assemblies) — no screenshot needed. This is how the
+        build loop should validate joints (e.g. that framed extrusions butt rather
+        than run into each other) instead of relying on captured views.
+
+        `tolerance_mm` ignores overlaps thinner than this on any axis (touching
+        faces are not clashes). Returns {part_count, pairs_checked, clash_count,
+        clashes:[{a, b, overlap_mm:[x,y,z]}]}, worst first.
+
+        NOTE: AABB overlap is a conservative proxy — two non-box parts whose boxes
+        overlap may not truly collide — but for axis-aligned extrusion frames it is
+        exact enough to catch corner interpenetration.
+        """
+        state = get_state()
+        tol = float(tolerance_mm) / 1000.0
+
+        def work():
+            parts = []
+            for el in state.iter_top_elements():
+                parts.extend(_iter_leaf_parts(state, el))
+            clashes = []
+            n = len(parts)
+            checked = 0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    checked += 1
+                    ov = _aabb_overlap(parts[i][2], parts[j][2], tol)
+                    if ov is not None:
+                        clashes.append({
+                            "a": parts[i][0], "b": parts[j][0],
+                            "overlap_mm": [round(x * 1000.0, 3) for x in ov],
+                            "_vol": ov[0] * ov[1] * ov[2],
+                        })
+            clashes.sort(key=lambda c: c["_vol"], reverse=True)
+            for c in clashes:
+                c.pop("_vol", None)
+            return {"part_count": n, "pairs_checked": checked,
+                    "clash_count": len(clashes), "clashes": clashes}
+
+        try:
+            return await run_on_com(work)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
 
     @mcp.tool()
     async def ironcad_get_selection() -> dict:

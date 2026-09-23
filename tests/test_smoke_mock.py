@@ -116,7 +116,7 @@ def test_all_tools_and_prompt_register():
     expected = {
         "ironcad_status", "ironcad_attach", "ironcad_get_active_doc_info",
         "ironcad_list_parts", "ironcad_describe_part", "ironcad_get_selection",
-        "ironcad_get_anchor",
+        "ironcad_get_anchor", "ironcad_get_part_bbox", "ironcad_check_interference",
         "ironcad_capture_view", "ironcad_list_catalogs", "ironcad_list_catalog_parts",
         "ironcad_get_catalog_part_info", "ironcad_add_catalog_part",
         "ironcad_build_parts",

@@ -322,6 +322,26 @@ stand-in; `AssembleElements` is now the true "move together" link. Still unteste
 `Solve`/constraints and `MoveChild` re-parenting (not needed for basic grouping).
 **Never fabricate a method name.**
 
+## 10. Interference / joint awareness (calculate, don't screenshot) — VERIFIED
+
+Real parts have a cross-section, so members whose axes meet at a point
+INTERPENETRATE (verified: naive 40×40 cube had 4 corner clashes of 40×40×40 mm).
+Build by CALCULATION, not screenshots:
+
+- `ironcad_get_part_bbox(name)` → global `{dims_m, min_m, max_m, center_m}`
+  (IZPart.GetBoundingBox). Read a profile's section (40×40 → dims ~[0.04,0.04,L])
+  and extents, then compute placements.
+- `ironcad_check_interference(tolerance_mm=0.5)` → pairwise AABB overlap of every
+  leaf part (recurses assemblies), `{clash_count, clashes:[{a,b,overlap_mm}]}`.
+  Aim for clash_count 0 (touching faces are not clashes). AABB is exact for
+  axis-aligned extrusion frames; conservative for non-box/rotated parts.
+
+Clash-free frame recipe (equal fixed-length bars, section t): put the 4 posts in
+the corner columns spanning z[0,L]; stack the horizontal bars in thin z-layers
+OUTSIDE [0,L] with the two horizontal axes on separate layers (bottom X z[-t,0],
+bottom Y z[-2t,-t], top X z[L,L+t], top Y z[L+t,L+2t]) → members butt, never
+interpenetrate. Verified via `ironcad_check_interference` → 0 clashes.
+
 ## RESOLVED (were open)
 - ✅ `InsertElement()` — returns the new IZElement, lands in the active scene at a default transform; name auto-resolves parametric placeholders (e.g. `PIL4140SNN_` → `PIL4140SNN500`).
 - ✅ `IZParameter` value get/set → `.Value` (float), `.Expression` (str).
@@ -337,8 +357,16 @@ stand-in; `AssembleElements` is now the true "move together" link. Still unteste
    transform/behavior, CreateLinks, AssembleElements, Solve). Still need ONE gated
    live write on a scratch scene to verify behavior/VARIANT marshaling, then wire
    `ironcad_connect_parts`. Stand-in until then: `relative_to`+`offset` (§9).
-6. **Bounding-box read** — needed for edge/face alignment (flush placement); no
-   confirmed call yet. Add to the connect spike.
+6. ~~Bounding-box read~~ ✅ RESOLVED 2026-09-18: `el.QueryInterface(ICAPI.IZPart).GetBoundingBox(vbInLocalSpace)`
+   → VARIANT[6] = [minx,miny,minz,maxx,maxy,maxz] (also on IZAssembly/IZBody/IZFeature).
+7. **Catalog profile length control** — for `PIL4040SNN_` (40x40 T-slot, 500mm
+   default) the length param 'Abdeckleiste' is expression-driven; Value/Expression/
+   TryToSetExpression all return "Not implemented". Length not settable via API for
+   this part type; open whether other catalog parts differ.
+8. **Rotation axes**: `SetRotation(nAxis,deg,applyToCurrent)` uses the part's LOCAL
+   frame. Default extrusion length = global +Y on insert. Recipes (rotation_deg
+   [rx,ry,rz], applied 0,1,2): +Z=[0,-90,0]; +X=[0,-90,-90]. Now exposed as
+   `rotation_deg` on add_catalog_part / build_parts.
 
 ## Reproduce
 `scripts/discover_api.py` performs the read-only live discovery above (QI path,
