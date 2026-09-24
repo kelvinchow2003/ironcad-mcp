@@ -54,6 +54,38 @@ def test_resolve_case_insensitive_unique():
     assert it.index == 0
 
 
+# ---- regression: ambiguous name + index (fixed 2026-09-24) --------------
+# Previously `index_fallback` was only ever consulted when a name had ZERO
+# matches, so it did nothing for the (common) case of a name shared by 2+
+# stock catalog parts — exactly the scenario a symmetric T-slot frame hits
+# for every group of identically-cut members. See PRODUCTION_READINESS_PLAN
+# Phase 1.1 / MCP_TEST_REPORT_173.md.
+
+def test_resolve_ambiguous_with_index_disambiguates():
+    it = safety.resolve_by_name(_items(), "Bolt", index_fallback=2)
+    assert it.index == 2 and it.name == "Bolt"
+    it = safety.resolve_by_name(_items(), "Bolt", index_fallback=1)
+    assert it.index == 1 and it.name == "Bolt"
+
+
+def test_resolve_ambiguous_case_insensitive_with_index_disambiguates():
+    it = safety.resolve_by_name(_items(), "bolt", index_fallback=2)
+    assert it.index == 2 and it.name == "Bolt"
+
+
+def test_resolve_ambiguous_bad_index_still_refuses():
+    # index_fallback that doesn't correspond to any item at all -> still refuses.
+    with pytest.raises(NameResolutionError):
+        safety.resolve_by_name(_items(), "Bolt", index_fallback=99)
+
+
+def test_resolve_unique_exact_match_wins_over_index():
+    # A clean, unambiguous exact match takes priority over a (wrong) index —
+    # index is only a fallback for missing/ambiguous names, never an override.
+    it = safety.resolve_by_name(_items(), "Bracket", index_fallback=1)
+    assert it.index == 0 and it.name == "Bracket"
+
+
 # ---- mode gating --------------------------------------------------------
 
 def test_read_only_refuses_writes(monkeypatch):

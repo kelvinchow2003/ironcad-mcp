@@ -152,11 +152,24 @@ def register(mcp) -> None:  # noqa: ANN001
         far end for a given part family (check bbox after; not all families
         necessarily support both directions symmetrically, untested).
 
+        IMPORTANT (fixed 2026-09-24 — was a real bug): the part has TWO
+        independent `ExtrudeDistance` slots, one per direction. Earlier this
+        tool only ever set the slot for the requested direction, leaving the
+        OTHER slot at whatever the catalog default left it (typically the
+        insert default, e.g. 500mm forward) — so `backward=True` silently
+        produced a part `length_m + <stale other-direction length>` long, not
+        `length_m`. This tool now always sets BOTH slots explicitly: the
+        requested direction to `length_m`, and the other direction to 0.0, so
+        the part's total length is exactly `length_m` regardless of prior
+        state. (For the ordinary forward-only case this is a no-op, since the
+        backward slot was already 0 by default.)
+
         Resolves by NAME (index fallback). Requires read_write mode; backs up
         first. Refuses if the resolved element has no `Block`-style extrude
         feature as its first child (e.g. an assembly, or a part built some
         other way) — try `ironcad_set_part_parameter` for those instead.
-        Returns {name (new BOM name), old_length_m, new_length_m, dims_m}.
+        Returns {name (new BOM name), old_length_m, new_length_m, dims_m,
+        other_direction_length_m (should be 0.0 — confirms the fix applied)}.
         """
         state = get_state()
 
@@ -181,17 +194,31 @@ def register(mcp) -> None:  # noqa: ANN001
                     f"is not an extrude feature: {exc}"
                 ) from exc
             dir_code = 1 if backward else 0  # Z_EXTRUDE_DIRECTION_BACKWARD/FORWARD
+            other_code = 0 if backward else 1
             old = None
             try:
                 old = float(ef.ExtrudeDistance(dir_code))
             except Exception:  # noqa: BLE001
                 pass
             ef.ExtrudeDistance[dir_code] = float(length_m)
+            try:
+                ef.ExtrudeDistance[other_code] = 0.0
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "Could not zero the other ExtrudeDistance[%d] direction on "
+                    "'%s' — total length may include a stale offset: %s",
+                    other_code, chosen.name, exc,
+                )
             part = el.QueryInterface(state.ICAPI.IZPart)
             part.Regenerate()
             new = None
             try:
                 new = float(ef.ExtrudeDistance(dir_code))
+            except Exception:  # noqa: BLE001
+                pass
+            other_new = None
+            try:
+                other_new = float(ef.ExtrudeDistance(other_code))
             except Exception:  # noqa: BLE001
                 pass
             dims = None
@@ -206,7 +233,8 @@ def register(mcp) -> None:  # noqa: ANN001
             except Exception:  # noqa: BLE001
                 pass
             return {"name": new_name or chosen.name, "old_length_m": old,
-                    "new_length_m": new, "dims_m": dims, "backup_path": backup_path}
+                    "new_length_m": new, "other_direction_length_m": other_new,
+                    "dims_m": dims, "backup_path": backup_path}
 
         try:
             return await run_on_com(work)
@@ -279,19 +307,30 @@ def register(mcp) -> None:  # noqa: ANN001
 
     @mcp.tool()
     async def ironcad_connect_parts(
-        names: list,
+        names: Optional[list] = None,
+        indices: Optional[list] = None,
         assembly_name: Optional[str] = None,
     ) -> dict:
         """Group parts into an ASSEMBLY so they move together (WRITE).
 
         This is the programmatic equivalent of selecting parts and assembling them
         — the true "connect" that makes parts a single linked group (verified:
-        IZSceneDoc.AssembleElements, API_NOTES §9b). Pass 2+ existing part NAMES;
-        they are grouped under a new assembly whose children move as one.
+        IZSceneDoc.AssembleElements, API_NOTES §9b). Identify the parts to group
+        via `names` (top-level part NAMES) and/or `indices` (top-level indices,
+        as returned by ironcad_list_parts) — combine both if useful; together they
+        must resolve to 2+ DISTINCT parts.
+
+        Prefer `indices` for symmetric/stock catalog frames: identical members
+        (e.g. 4 posts cut to the same length) share the same auto-BOM name, which
+        makes plain `names` resolution refuse as ambiguous (by design — see
+        ironcad_add_catalog_part's BOM-naming warning: renaming to disambiguate
+        would destroy BOM tracking). `indices` sidesteps that entirely.
 
         `assembly_name` optionally renames the created assembly. Requires
-        read_write mode; backs up first. Refuses on <2 names or any missing/
-        ambiguous name. Returns {assembly, children, count, backup_path}.
+        read_write mode; backs up first. Refuses on <2 distinct parts or any
+        missing/ambiguous name (when using `names` without a disambiguating
+        index) or out-of-range index. Returns {assembly, children, count,
+        backup_path}.
 
         Use this AFTER positioning the parts (e.g. via relative_to/offset): place
         them where they connect, then group them so later moves keep them together.
@@ -300,10 +339,13 @@ def register(mcp) -> None:  # noqa: ANN001
 
         def work():
             require_write_mode("ironcad_connect_parts")
-            wanted = [str(n) for n in (names or [])]
-            if len(wanted) < 2:
-                raise RuntimeError("Pass at least two part names to connect.")
-            # Resolve every name to a top-level element (fail before mutating).
+            wanted_names = [str(n) for n in (names or [])]
+            wanted_indices = [int(i) for i in (indices or [])]
+            if len(wanted_names) + len(wanted_indices) < 2:
+                raise RuntimeError(
+                    "Pass at least two parts to connect, via `names` and/or `indices`."
+                )
+            # Resolve every reference to a top-level element (fail before mutating).
             items = []
             for i, el in enumerate(state.iter_top_elements()):
                 try:
@@ -311,12 +353,33 @@ def register(mcp) -> None:  # noqa: ANN001
                 except Exception:  # noqa: BLE001
                     nm = f"<element {i}>"
                 items.append(NamedItem(i, nm, el))
+            by_index = {it.index: it for it in items}
+
             elements = []
             resolved_names = []
-            for n in wanted:
-                chosen = resolve_by_name(items, n)
+            seen_indices: set[int] = set()
+
+            def _add(chosen: NamedItem) -> None:
+                if chosen.index in seen_indices:
+                    return  # same part referenced twice (once by name, once by index)
+                seen_indices.add(chosen.index)
                 elements.append(chosen.obj)
                 resolved_names.append(chosen.name)
+
+            for idx in wanted_indices:
+                if idx not in by_index:
+                    raise RuntimeError(
+                        f"No part at index {idx}. Available indices: "
+                        f"{sorted(by_index)}."
+                    )
+                _add(by_index[idx])
+            for n in wanted_names:
+                _add(resolve_by_name(items, n))
+
+            if len(elements) < 2:
+                raise RuntimeError(
+                    "`names`/`indices` resolved to fewer than two distinct parts."
+                )
             backup_path = backup_active_doc(state.active_doc_name())
 
             # Verified: a plain Python list of IZElement pointers marshals to the
@@ -350,7 +413,7 @@ def register(mcp) -> None:  # noqa: ANN001
         try:
             return await run_on_com(work)
         except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc), "names": names}
+            return {"error": str(exc), "names": names, "indices": indices}
 
     @mcp.tool()
     async def ironcad_set_anchor(

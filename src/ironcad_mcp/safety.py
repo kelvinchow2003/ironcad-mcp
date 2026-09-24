@@ -120,29 +120,55 @@ def resolve_by_name(
     """Resolve a part by name (primary) with index fallback (spec Section 6).
 
     Refuses on missing or ambiguous names rather than guessing.
+
+    ``index_fallback`` is consulted whenever plain name resolution does not
+    produce a single unambiguous hit — i.e. on an AMBIGUOUS name (2+ parts
+    share it, the common case for symmetric stock catalog parts whose
+    auto-BOM name collapses on identical geometry) as well as on a MISSING
+    name. It is only ignored when the name alone already resolves uniquely,
+    so an unambiguous name always takes priority over a stale/wrong index.
+    (Fixed 2026-09-24: previously the index was only ever tried after a
+    *zero*-match search, so passing ``index`` never helped disambiguate an
+    ambiguous name — the exact case that matters most in practice.)
     """
     items = list(items)
+
+    def _by_index() -> Optional[NamedItem]:
+        if index_fallback is None:
+            return None
+        for it in items:
+            if it.index == index_fallback:
+                return it
+        return None
+
     exact = [it for it in items if it.name == name]
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
+        hit = _by_index()
+        if hit is not None:
+            return hit
         raise NameResolutionError(
             f"Ambiguous name '{name}': {len(exact)} parts share it "
-            f"(indices {[it.index for it in exact]}). Refusing to guess; use the "
-            f"index or a unique instance name."
+            f"(indices {[it.index for it in exact]}). Refusing to guess; pass "
+            f"the `index` of the one you mean, or a unique instance name."
         )
-    # No exact match -> try case-insensitive, still refusing if ambiguous.
+    # No exact match -> try case-insensitive, still consulting index on ambiguity.
     ci = [it for it in items if it.name.lower() == name.lower()]
     if len(ci) == 1:
         return ci[0]
     if len(ci) > 1:
+        hit = _by_index()
+        if hit is not None:
+            return hit
         raise NameResolutionError(
-            f"Ambiguous name '{name}' (case-insensitive match hit {len(ci)} parts)."
+            f"Ambiguous name '{name}' (case-insensitive match hit {len(ci)} "
+            f"parts, indices {[it.index for it in ci]}). Pass the `index` of "
+            f"the one you mean."
         )
-    if index_fallback is not None:
-        for it in items:
-            if it.index == index_fallback:
-                return it
+    hit = _by_index()
+    if hit is not None:
+        return hit
     available = ", ".join(sorted(it.name for it in items)) or "(none)"
     raise NameResolutionError(
         f"No part named '{name}'. Available: {available}."
