@@ -490,7 +490,6 @@ def register(mcp) -> None:  # noqa: ANN001
         def work():
             require_write_mode("ironcad_save")
             current = state.active_doc_name()
-            backup_path = backup_active_doc(current)
             z_ignore = getattr(state.ICAPI, "Z_LINKS_IGNORE", 5)
             if not path:
                 # In-place save via IZDoc.Save().
@@ -500,15 +499,18 @@ def register(mcp) -> None:  # noqa: ANN001
                         "This document has never been saved; provide a `path` to "
                         "save it to a new .ics file."
                     )
+                backup_path = backup_active_doc(current)
                 doc.Save()
                 return {"saved_to": current, "backup_path": backup_path}
-            # Save-as to a path.
+            # Save-as to a path. Check the overwrite guard BEFORE the backup
+            # so a refusal reports the real reason.
             target = os.path.abspath(path)
             if os.path.isfile(target) and os.path.abspath(current or "") != target and not overwrite:
                 raise RuntimeError(
                     f"Refusing to overwrite existing file '{target}'. Pass "
                     f"overwrite=True to allow it."
                 )
+            backup_path = backup_active_doc(current)
             state.scene().SaveAs(target, z_ignore, bool(overwrite) or not os.path.isfile(target))
             return {"saved_to": target, "backup_path": backup_path}
 

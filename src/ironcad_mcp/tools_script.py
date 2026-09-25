@@ -32,6 +32,19 @@ from .safety import backup_active_doc, require_write_mode
 
 _logger = get_logger()
 
+# Visibility only (spec §7.1) — NOT a sandbox and NOT a block. Flags snippets
+# that touch save/delete-shaped calls so the tool's own return value surfaces
+# that fact to whoever is reading the result, even though the call already
+# ran. Deliberately a plain substring scan, not real code analysis.
+_DANGEROUS_SUBSTRINGS = (
+    "SaveAs", "SaveAsCopy", ".Save(", "Exit(", "os.remove", "os.unlink",
+    "shutil.rmtree", "CloseFile", "Delete", "os.system", "subprocess",
+)
+
+
+def _flag_dangerous(code: str) -> list[str]:
+    return sorted({s for s in _DANGEROUS_SUBSTRINGS if s in code})
+
 
 def register(mcp) -> None:  # noqa: ANN001
 
@@ -42,14 +55,27 @@ def register(mcp) -> None:  # noqa: ANN001
         NOT a sandbox. Defaults to read-only intent; set allow_writes=True to
         permit mutation (also requires read_write mode and takes a backup first).
         In scope: ICAPI, app, base, doc, scene, catalog_mgr, state. Assign
-        `result` to return a value. Returns {result, stdout, ok} or {error, traceback}.
+        `result` to return a value. Returns {result, stdout, ok,
+        dangerous_calls_detected} or {error, traceback}.
+
+        AUDITED (spec §7.1): every call — the full `code` text, `allow_writes`,
+        and whether it succeeded — is logged at WARNING level with a
+        `SCRIPT_AUDIT:` prefix (greppable in the server's log, distinct from
+        routine debug lines), since this tool's whole point is running code
+        this project hasn't given a dedicated, reviewed tool signature to.
+        `dangerous_calls_detected` is a best-effort substring scan (Save/
+        SaveAs/Delete/os.remove/subprocess/...) surfaced in the RESULT for
+        visibility — it does not block anything; the call already ran by the
+        time you see it.
         """
         state = get_state()
+        flagged = _flag_dangerous(code)
 
         def work():
             if allow_writes:
                 require_write_mode("ironcad_execute_api_script(allow_writes=True)")
-                backup_active_doc(state.active_doc_name())
+                backup_active_doc(state.active_doc_name(),
+                                   action="ironcad_execute_api_script")
             state.require_base()
             doc = None
             scene = None
@@ -80,15 +106,23 @@ def register(mcp) -> None:  # noqa: ANN001
                     except SyntaxError:
                         exec(compile(code, "<ironcad_script>", "exec"), env)  # noqa: S102
                         result = env.get("result")
-                return {"ok": True, "result": _stringify(result), "stdout": buf.getvalue()}
+                return {"ok": True, "result": _stringify(result), "stdout": buf.getvalue(),
+                        "dangerous_calls_detected": flagged}
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "error": str(exc),
-                        "traceback": traceback.format_exc(), "stdout": buf.getvalue()}
+                        "traceback": traceback.format_exc(), "stdout": buf.getvalue(),
+                        "dangerous_calls_detected": flagged}
 
         try:
-            return await run_on_com(work)
+            outcome = await run_on_com(work)
         except Exception as exc:  # noqa: BLE001 - e.g. WriteRefused / not connected
-            return {"ok": False, "error": str(exc)}
+            outcome = {"ok": False, "error": str(exc), "dangerous_calls_detected": flagged}
+
+        _logger.warning(
+            "SCRIPT_AUDIT: allow_writes=%s ok=%s dangerous_calls=%s\n--- code ---\n%s\n--- end code ---",
+            allow_writes, outcome.get("ok"), flagged, code,
+        )
+        return outcome
 
 
 def _stringify(value: Any) -> Any:

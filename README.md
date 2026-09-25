@@ -12,7 +12,7 @@ catalog.
 > machine- and session-local). Viewing that machine over RDP/TeamViewer is fine;
 > it is not part of Claude's path to IronCAD.
 
-## Status — M0–M5 complete, verified against live IronCAD 2024
+## Status — M0–M5 complete; production-hardening in progress (v0.2.0)
 
 - ✅ **M0** scaffold, STA COM worker, stdout guard (0-byte leak verified).
 - ✅ **M1** discovery — every priority target resolved with live snippets
@@ -22,9 +22,24 @@ catalog.
   (instantiate by name; backup-first). Verified: placed & positioned real parts.
 - ✅ **M4** edit/save — set-parameter, move (matrix), save/save-copy, read-only
   gating, escape hatch. **SilentMode** suppresses modal dialogs (see below).
-- ✅ **M5** `build_from_sketch` MCP prompt (plan → confirm → build → verify → save).
+- ✅ **M5** two prompts, `interpret_drawing` (vision-only spec.json) →
+  `build_from_sketch` (plan → confirm → build → verify → save against the
+  approved spec).
 
-**16 tools** + 1 prompt; 12 mock unit tests. See `tests/MANUAL_TEST.md` for the
+**Core COM primitives (placement, resize, connect, measurement, read) are
+live-verified and reliable.** A rough structural mockup from a real drawing
+works end-to-end. What is NOT yet true: BOM-faithful parity with a
+hand-built Robotunits design (real fastener/connector geometry, the exact
+panel-retention-rail hardware) without falling back to the raw script escape
+hatch for anything the tool layer doesn't have a first-class call for yet.
+See **`MCP_TEST_REPORT_173.md`** for the honest baseline this was measured
+against, and **`PRODUCTION_READINESS_PLAN.md`** (mostly implemented as of
+v0.2.0 — see `CHANGELOG.md`) for what closed that gap and what's still open.
+
+**28 tools** + 2 prompts; 30 mock unit tests + a 16-test opt-in live
+integration suite (`tests/integration/`, `IRONCAD_MCP_LIVE_TESTS=1`) + a
+golden-file regression snapshot of a real hand-built design
+(`tests/golden/`). See `tests/MANUAL_TEST.md` for the original M0–M5
 live verification log.
 
 ### Dialog safety (SilentMode)
@@ -43,6 +58,21 @@ reports `silent_mode`.
    causes COM load failures.
 
 ## Setup
+
+Fast path — from the project root, in an ordinary (not elevated) PowerShell:
+
+```powershell
+.\scripts\setup.ps1
+```
+
+Checks Python version/bitness, creates or reuses `.venv`, installs the
+package, detects your IronCAD install + registration status, and prints a
+ready-to-paste `claude_desktop_config.json` snippet with real paths filled
+in. Idempotent — safe to re-run. It does **not** perform the elevated COM
+registration step below (that needs its own Administrator prompt, kept as an
+explicit separate step).
+
+Or manually:
 
 ```powershell
 # from the project root
@@ -114,12 +144,18 @@ representative real drawing of yours, not "any sketch."
 | Var | Default | Meaning |
 |---|---|---|
 | `IRONCAD_MCP_MODE` | `read_only` | `read_only` \| `read_write` |
-| `IRONCAD_MCP_BACKUP_DIR` | (unset) | required for any write; timestamped backups land here |
+| `IRONCAD_MCP_BACKUP_DIR` | (unset) | required for any write; timestamped backups land here (+ `audit.log.jsonl`) |
+| `IRONCAD_MCP_BACKUP_RETENTION_COUNT` | `20` | max backups kept per source file (oldest pruned after each new one); `0` disables pruning |
+| `IRONCAD_MCP_COM_TIMEOUT_S` | `30` | per-call watchdog timeout before a COM call is presumed wedged; `0` disables (wait forever) |
 | `IRONCAD_MCP_LOG_LEVEL` | `INFO` | logging level (to stderr) |
 | `IRONCAD_MCP_LOG_FILE` | (unset) | optional rotating log file path |
 
 ## Layout
 
-See `src/ironcad_mcp/` (server, com_worker, connection, safety, logging_setup),
-`scripts/discover_api.py` (M1 spike), `API_NOTES.md` (verified ICAPI calls),
-`tests/`.
+See `src/ironcad_mcp/` (server, com_worker, connection, safety,
+logging_setup, catalog_manifest, spec_schema, `data/catalog_manifest.json`),
+`scripts/discover_api.py` (M1 spike), `scripts/setup.ps1` (bootstrap),
+`scripts/verify_catalog_manifest.py` (manifest drift check), `API_NOTES.md`
+(verified ICAPI calls), `tests/` (mock unit tests + `tests/integration/`
+live suite + `tests/golden/` snapshots), `PRODUCTION_READINESS_PLAN.md` +
+`MCP_TEST_REPORT_173.md` + `CHANGELOG.md` (project history/roadmap).

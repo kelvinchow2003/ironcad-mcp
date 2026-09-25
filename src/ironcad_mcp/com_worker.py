@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import queue
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from .logging_setup import get_logger, redirect_stdout_to_stderr
@@ -34,6 +36,32 @@ _logger = get_logger()
 
 # Sentinel pushed onto the queue to stop the worker loop.
 _SHUTDOWN = object()
+
+_DEFAULT_TIMEOUT_S = 30.0
+
+
+def _call_timeout_s() -> float:
+    """Per-call watchdog timeout (spec Phase 4.3). A hung COM call (e.g. a
+    modal dialog SilentMode didn't catch) blocks the single STA worker thread
+    forever — there is no safe way to force-cancel a stuck native call, but
+    the CALLER can at least get a timely, clear error instead of hanging the
+    whole MCP connection indefinitely. Set IRONCAD_MCP_COM_TIMEOUT_S=0 (or
+    negative) to disable (wait forever, the old behavior)."""
+    raw = os.environ.get("IRONCAD_MCP_COM_TIMEOUT_S")
+    if raw is None:
+        return _DEFAULT_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_TIMEOUT_S
+
+
+def _call_label(fn: Callable[[], Any]) -> str:
+    """Best-effort human label for a queued callable, for logging. Every tool
+    handler in this codebase submits a nested `def work(): ...` closure, so
+    `__qualname__` naturally reads like `ironcad_add_catalog_part.<locals>.work`
+    — informative without any call-site changes."""
+    return getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None) or repr(fn)
 
 
 class ComWorkerError(RuntimeError):
@@ -107,9 +135,27 @@ class ComWorker:
                     # Guard against native prints leaking to stdout (spec 2.2).
                     with redirect_stdout_to_stderr():
                         result = fn()
-                    future.set_result(result)
                 except BaseException as exc:  # noqa: BLE001 - propagate to caller
-                    future.set_exception(exc)
+                    # The caller (run_on_com/run()) may have already given up
+                    # on this future via the Phase 4.3 watchdog timeout, which
+                    # CANCELS it from the asyncio side while this thread is
+                    # still blocked inside fn(). set_exception() on an
+                    # already-cancelled future raises InvalidStateError, which
+                    # would otherwise escape this loop entirely and KILL the
+                    # worker thread (turning one slow/wedged call into total
+                    # worker death instead of just that one call timing out) —
+                    # guard it the same way as the success path below.
+                    if not future.cancelled():
+                        try:
+                            future.set_exception(exc)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
+                if not future.cancelled():
+                    try:
+                        future.set_result(result)
+                    except Exception:  # noqa: BLE001
+                        pass
         finally:
             try:
                 pythoncom.CoUninitialize()
@@ -131,9 +177,49 @@ class ComWorker:
         return self.submit(fn).result(timeout=timeout)
 
     async def run(self, fn: Callable[[], Any]) -> Any:
-        """Async entry point used by tool handlers: ``await worker.run(fn)``."""
+        """Async entry point used by tool handlers: ``await worker.run(fn)``.
+
+        Logs each call's label/duration/outcome (Phase 4.4) and enforces the
+        watchdog timeout (Phase 4.3, see `_call_timeout_s`). A timeout does
+        NOT free the worker thread — the native COM call underneath is still
+        blocked — so the worker is left effectively unusable for any FURTHER
+        call until IronCAD itself recovers or is restarted; that state is
+        exactly what `ComWorkerError` here should prompt the caller to notice
+        and act on, rather than waiting silently forever.
+        """
+        label = _call_label(fn)
         future = self.submit(fn)
-        return await asyncio.wrap_future(future)
+        timeout = _call_timeout_s()
+        started = time.monotonic()
+        try:
+            if timeout > 0:
+                result = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+            else:
+                result = await asyncio.wrap_future(future)
+        except asyncio.TimeoutError as exc:
+            elapsed = time.monotonic() - started
+            _logger.error(
+                "COM call TIMED OUT after %.1fs (label=%s, limit=%.1fs) — the "
+                "worker thread is likely wedged (e.g. a modal dialog SilentMode "
+                "didn't suppress). Further calls will likely also hang until "
+                "IronCAD is restarted (and this server with it).",
+                elapsed, label, timeout,
+            )
+            raise ComWorkerError(
+                f"COM call '{label}' did not complete within {timeout:.0f}s and "
+                f"is presumed wedged (e.g. a modal dialog). The underlying "
+                f"IronCAD call is still blocked; restart IronCAD and this MCP "
+                f"server to recover. Set IRONCAD_MCP_COM_TIMEOUT_S to change "
+                f"this limit, or 0 to disable it."
+            ) from exc
+        except BaseException:
+            elapsed = time.monotonic() - started
+            _logger.warning("COM call FAILED after %.3fs (label=%s)", elapsed, label)
+            raise
+        else:
+            elapsed = time.monotonic() - started
+            _logger.info("COM call OK in %.3fs (label=%s)", elapsed, label)
+            return result
 
 
 # ---- module-level singleton + convenience ------------------------------

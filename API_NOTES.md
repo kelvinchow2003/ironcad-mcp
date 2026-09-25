@@ -371,3 +371,12 @@ interpenetrate. Verified via `ironcad_check_interference` → 0 clashes.
 ## Reproduce
 `scripts/discover_api.py` performs the read-only live discovery above (QI path,
 catalog/scene enumeration, JPEG export). Re-run after any IronCAD upgrade.
+
+## Camera (verified live 2026-09-24)
+
+`scene.CameraMgr.ActiveCamera` -> `IZCamera`. Getters return tuples.
+Setters (`Position`, `Direction`, `Up`, `CenterOfInterest`) take a VARIANT
+that must be a SAFEARRAY of doubles: pass `array.array('d', [x, y, z])`. A
+plain tuple or list marshals as a VARIANT array and fails with E_INVALIDARG.
+`AdjustCameraToFitShapeInRect` keeps the direction you set, so set the
+direction, then fit, then `ExportImage`. Used by `ironcad_capture_view(view=...)`.

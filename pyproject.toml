@@ -1,12 +1,15 @@
 [project]
 name = "ironcad-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local MCP server wrapping IronCAD 2024's COM API (python-ironcad / ICAPI) so Claude can build from a sketch using the user's own catalog."
 readme = "README.md"
 requires-python = ">=3.11"
 
 # Pins are deliberate. See README + API_NOTES.md for the reasoning:
 #  * mcp<2  -> mcp 2.x renamed FastMCP to MCPServer; the spec's code targets FastMCP.
+#    TRACK THIS: an mcp 2.x migration is a real future landmine (PRODUCTION_
+#    READINESS_PLAN.md Phase 8.2) — not scheduled, but don't let a fresh
+#    install silently pull an incompatible 2.x without noticing.
 #  * python-ironcad brings comtypes==1.4.16 (its real COM layer, not pywin32).
 #  * pywin32 supplies pythoncom for STA CoInitialize on the worker thread.
 dependencies = [
@@ -14,6 +17,7 @@ dependencies = [
     "python-ironcad==0.1.21",
     "pywin32==312",
     "comtypes==1.4.16",
+    "jsonschema>=4",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +35,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ironcad_mcp"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/ironcad_mcp/data/catalog_manifest.json" = "ironcad_mcp/data/catalog_manifest.json"
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "live: requires an already-running, attached IronCAD instance; opt-in via IRONCAD_MCP_LIVE_TESTS=1",
+]

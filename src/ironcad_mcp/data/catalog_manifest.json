@@ -1,0 +1,126 @@
+{
+  "_meta": {
+    "description": "Structured, machine-readable decode of the user's loaded IronCAD catalogs — what each part-number prefix means, which entries actually work via InsertElement(), which parameters are real/settable, and which tool/technique to use per family. Generated from live probing (see PRODUCTION_READINESS_PLAN.md Phase 6 and ironcad-catalog-reference / ironcad-mcp-project memory), NOT guessed from names. This is a SNAPSHOT, not an API contract — re-verify with scripts/verify_catalog_manifest.py before trusting an old entry if it's been a while (catalogs can change on IronCAD/catalog updates).",
+    "brand": "A German T-slot aluminum extrusion framing system (parameter names like 'Abdeckleiste'/'Dicke'/'Gesamtbreite'/'Breite'/'Hoehe' are German) — matches the Robotunits catalog naming convention.",
+    "last_verified": "2026-09-24",
+    "source_session_notes": "ironcad-mcp-project + ironcad-catalog-reference memory files"
+  },
+  "catalogs": {
+    "PIL_DIST": {
+      "purpose": "T-slot EXTRUSION profiles ('Profil'). Name pattern PIL<w><h>SNN_ where w,h = cross-section mm.",
+      "sizes_in_stock_mm": ["10x10", "10x20", "16x40", "25x20", "40x12", "40x40", "40x80", "41x40", "41x80", "50x10", "50x20", "50x50", "80x80"],
+      "note_no_45mm": "No 45mm profile exists in this install. Closest to a 45mm drawing spec is 40x40 (PIL4040SNN_) or 50x50 (PIL5050SNN_).",
+      "default_insert_length_mm": 500,
+      "length_control": {
+        "inert_param": "Abdeckleiste (value always 0.5, expression-driven PAR(...), NOT settable — Value/.Expression/.TryToSetExpression all fail 'Not implemented')",
+        "real_mechanism": "element.GetFirstChild() ('Block' feature) -> QueryInterface(IZExtrudeFeature) -> ExtrudeDistance[0] (forward) is DIRECTLY settable to ANY length (tested 50mm-2500mm+). Wired as ironcad_set_extrude_length.",
+        "gotcha": "ExtrudeDistance get is a method call ef.ExtrudeDistance(0); SET must use bracket/item syntax ef.ExtrudeDistance[0] = x. When changing direction (backward=True), the OTHER direction's slot must also be explicitly zeroed or the part ends up target+stale_length long (fixed 2026-09-24 in ironcad_set_extrude_length)."
+      },
+      "bom_naming": "Name auto-updates to the real measured length on insert/cut/resize (PIL4040SNN_ -> PIL4040SNN500, PIL4040SNN420 after a cut, PIL4040SNN300 after ExtrudeDistance resize). NEVER set .Name/instance_name on a stock part meant to appear correctly in a BOM — it is destroyed permanently, does not come back even after regenerate.",
+      "rotation_recipe": "Default InsertElement orientation: length runs along GLOBAL +Y. To point along +Z: rotation_deg=[0,-90,0]. To point along +X: rotation_deg=[0,-90,-90] (origin end behavior is NOT symmetric between rotations -- always re-verify extrude-forward direction via a probe bbox after rotating, don't assume it transfers from a different rotation).",
+      "cross_section_example_40x40": {
+        "tslot_channel_mouth_width_mm": 14.0,
+        "tslot_channel_depth_mm": 14.0,
+        "tslot_channel_middle_from_face_mm": 7.0,
+        "note": "Each of the 4 faces has its own T-slot channel centered on that face. Measured via IZProfile.GetCurveIds/GetLineData on the Block feature's 2D sketch, not eyeballed. Re-derive per profile size — don't hardcode 7mm for a different width."
+      },
+      "recommended_tool": "ironcad_add_catalog_part / ironcad_build_parts for placement; ironcad_set_extrude_length for exact length."
+    },
+    "Connectors": {
+      "purpose": "Fastener/connector hardware.",
+      "usable_entries": {
+        "FAS40xx (e.g. FAS4041, FAS4049, FAS4001, FAS4051, FAS4081)": "ARTICULATING SWIVEL/HINGE JOINTS bundled with a small demo profile stub + handle/lever knob — an adjustable-angle connector, NOT a simple rigid corner gusset. Numeric suffix = profile width it's sized for (FAS40xx=40mm profile, FAS50xx=50mm, FAS16xx=16mm).",
+        "FAS1021 / FAS1025": "Small clamping-knob fasteners (Type=2, tiny)."
+      },
+      "failing_entries": ["'Angle connectors' (unnumbered)", "bare 'TIN' entry"],
+      "failing_entries_note": "InsertElement() fails with 'Unspecified error' — likely a folder/config node needing an interactive dialog IronCAD can't show under SilentMode. Don't retry; look for a differently-named sibling.",
+      "standing_rule": "DO NOT insert FAS*/CAP* hardware in an automated build (user's explicit instruction 2026-09-24) — IronCAD has a one-click add-on that adds correct fasteners/caps to a finished frame. Build only structural extrusions + panel/infill.",
+      "recommended_tool": "None (excluded by standing rule)."
+    },
+    "Cover_caps": {
+      "purpose": "Flat END CAPS for closing off an open profile end.",
+      "usable_entries": {
+        "CAP4041": "40x40x4mm flat plate, exactly a cap, no fastening function. Numeric suffix = profile width."
+      },
+      "standing_rule": "DO NOT insert CAP* in an automated build — see Connectors.standing_rule.",
+      "recommended_tool": "None (excluded by standing rule)."
+    },
+    "CAS_BAS": {
+      "purpose": "Mounting/base hardware.",
+      "failing_entries": ["CAS 80 with bolt hole", "CAS100 with bolt hole", "CAS100 with plate"],
+      "failing_entries_note": "All CAS-prefixed entries fail InsertElement() ('Unspecified error', config-dialog-gated).",
+      "usable_entries": {
+        "BAS4008 / BAS1020 / BAS1120 / BAS8010": "Flat rectangular MOUNTING/BASE PLATES with a 2xN bolt-hole pattern (e.g. BAS4008 = 39x39mm footprint x 91.5mm) — for bolting the whole frame down to a machine/floor, NOT a corner-joint bracket."
+      },
+      "recommended_tool": "ironcad_add_catalog_part (if a floor-mount plate is actually needed; not a corner bracket substitute)."
+    },
+    "Stand": {
+      "purpose": "LEG/STAND assemblies.",
+      "usable_entries": {
+        "TIN (in this catalog and Connectors)": "leg/stand assembly, Type=2 multi-body group.",
+        "C4F_Form_SR / 'C4 Height adjustable' (aka 'Steherpaar Hoehenverstellbar' = adjustable-height post pair) / R5F_Form_SR / R5K_Form_SR": "height-adjustable floor stands, sold as a PAIR — not a simple single mounting foot."
+      },
+      "note": "IZPart QI fails on these directly (Type=2 group) — would need IZAssembly/IZFeature bbox instead (see PAN_DIST notes on IZAssembly.GetBoundingBox working directly on a compound element).",
+      "recommended_tool": "ironcad_add_catalog_assembly (untested on this family specifically, but same Type=2 pattern as PAN_DIST's compound entries)."
+    },
+    "PAN_DIST": {
+      "purpose": "Flat panels + panel-frame edge hardware.",
+      "entries": {
+        "PAN___P_N___": {
+          "kind": "GENERIC FLAT PANEL, leaf part (Type=1). Default 500x500x4mm.",
+          "settable_params": {"Dicke": "thickness (metres) — genuinely settable via IZParameter.Value, unlike PIL's Abdeckleiste. Same underlying value as its Block->IZExtrudeFeature.ExtrudeDistance, so ironcad_set_extrude_length also works on it for thickness."},
+          "width_height": "NOT exposed as parameters on the bare entry. Custom W x H needs the Boolean tile-UNITE-then-trim-SUBTRACT recipe (see ironcad_build_panel).",
+          "recommended_tool": "ironcad_build_panel (arbitrary W x H) or ironcad_set_part_parameter/ironcad_set_extrude_length for thickness only."
+        },
+        "PAN___P_N___+PIN4521": {
+          "kind": "COMPOUND catalog entry (Type=2 assembly): panel + a linked 'PIN' sizing-helper element.",
+          "settable_params": {
+            "Gesamtbreite": "overall width (German 'total width'). Verified settable 0.1m-2.0m live 2026-09-24 with no upper clamp found (untested beyond 2.0m).",
+            "Gesamtlaenge": "overall length ('total length'). Same range behavior as Gesamtbreite."
+          },
+          "regenerate_requirement": "Setting these params requires element.QueryInterface(IZAssembly).RegenerateParts(True) to actually rebuild — a plain IZPart.Regenerate() fails (this entry mostly doesn't QI to IZPart at all) and a scene-wide regenerate does not propagate either.",
+          "geometry_param_relationship": "NOT a clean 1:1 — always measure the real bbox after setting+regenerating (via IZAssembly.GetBoundingBox, works directly with no child descent needed), never trust the nominal parameter value as the resulting size.",
+          "auto_positioning": "In the user's hand-built reference scene this part auto-positioned itself recessed into a T-slot opening once sized — the position is computed by the catalog part itself, not hand-placed (confirmed: resulting position had non-round coordinates).",
+          "recommended_tool": "ironcad_add_catalog_assembly with parameters={'Gesamtbreite':..., 'Gesamtlaenge':...}. Prefer this over ironcad_build_panel whenever the panel sits in a rectangular T-slot opening and the size fits this entry's range."
+        },
+        "PAN___P_N___+CAL4515SNN___+CAN4501": {
+          "kind": "COMPOUND catalog entry (Type=2 assembly): panel + the REAL Robotunits panel-retention-rail (CAL4515SNN) + connector block (CAN4501) hardware — this is what the user's hand-built designs (b150004_173.ics etc.) actually use, NOT the bare PAN___P_N___ or the PIN4521 variant.",
+          "settable_params": {
+            "Breite": "width (German). DIFFERENT NAME from the PIN4521 family's Gesamtbreite — verified live 2026-09-24, do not assume one name set applies to both compound entries.",
+            "Hoehe": "height (German). Different name from Gesamtlaenge."
+          },
+          "regenerate_requirement": "Same as PIN4521 — element.QueryInterface(IZAssembly).RegenerateParts(True) after setting params.",
+          "geometry_param_relationship": "Empirically closer to Y_span ~= 2*Breite - 0.556 in one live test (not a clean formula, not verified as general) — MEASURE the real bbox, do not compute from the param.",
+          "real_bom_composition": "Confirmed live via ironcad_list_children (recursive) on the user's real b150004_173.ics: children include CAL4515SNN____ retention-rail pieces, CAN4501 connector blocks, and the panel itself (named e.g. 'Polycarbonatglas 4-6mm PAN____P_N____' when a material has been assigned) — NOT a bare PAN___P_N___.",
+          "recommended_tool": "ironcad_add_catalog_assembly with parameters={'Breite':..., 'Hoehe':...} — THE preferred technique when matching the user's actual hand-built hardware/BOM style, not just dimensional fit."
+        },
+        "PAN___G5N___+PIN4521": {"kind": "sibling of PAN___P_N___+PIN4521 for a different panel-size family.", "settable_params": "UNVERIFIED — check live before assuming Gesamtbreite/Gesamtlaenge names carry over."},
+        "PAN___G5N___+CAL4515SNN___CAN4501": {"kind": "sibling of the CAL+CAN retention-rail entry for the G5N panel family.", "settable_params": "UNVERIFIED."},
+        "CAN4501": {"kind": "leaf connector block (~34x36x36mm), part of the CAL+CAN retention-rail system.", "standalone_use": "not typically inserted alone; appears as a child of the compound CAL+CAN entry."},
+        "CAN4503": {"kind": "leaf connector block (~34x48x58mm), sibling of CAN4501."},
+        "CAL4515SNN____": {"kind": "linear panel-retention rail (SNN naming matches the PIL profile convention — likely a settable-length linear part via the same GetFirstChild->IZExtrudeFeature pattern as PIL, UNVERIFIED directly, only probed as a child of the compound CAL+CAN entry so far)."},
+        "CAL4517SNN____": {"kind": "sibling rail size, not probed."}
+      },
+      "panel_fit_sizing_rule": {
+        "summary": "When a source drawing states an exact panel size, do NOT model it at that literal dimension — resize to fit the T-slot opening.",
+        "channel_facing_post_edge": "Panel edge lands at the MIDDLE of that post's T-slot channel depth (mouth-face to back-wall, measured on the live 2D profile — 7.0mm past the face for the 40mm profile specifically; re-derive per profile width, don't hardcode).",
+        "non_channel_facing_rail_edge": "Panel edge lands exactly on the clear daylight opening (zero inset).",
+        "why": "User's explicit instruction 2026-09-23/24 — the earlier asymmetric 11.5mm/8.5mm reading from a sample file was an imprecise hand-placement artifact, not the design intent; don't reproduce that asymmetry."
+      }
+    },
+    "MBS": {
+      "purpose": "Accessory inserts/adapters (front kit, slot kit, stop/flat/left/right inserts, tube/extrusion adapters) for the PIL profiles.",
+      "prefixes": ["MAT", "MAL"],
+      "status": "Not probed live yet — names suggest slot-fill accessories."
+    },
+    "LIN": {"purpose": "Linear-motion rail/carriage hardware.", "prefixes": ["LIN", "LIL"], "status": "Not probed."},
+    "Lean_Line": {"purpose": "Conveyor/lean-line framing accessories.", "prefixes": ["SSL", "SSP", "SLP", "SLD", "SLF", "SLS", "COL"], "status": "Not probed."},
+    "Side_guide_and_SC": {"purpose": "Side-guide rollers.", "prefixes": ["COP", "COL", "CCL"], "status": "Not probed."},
+    "Behaelter": {"purpose": "Standard containers (German 'Behaelter').", "prefixes": ["BOX"], "status": "Not probed."}
+  },
+  "general_rules": [
+    "A part failing InsertElement() with a bare 'Unspecified error' (not a Python/COM interface exception) generally means it's a config-dialog-gated catalog node (folder, or a part needing interactive selection) that can't be placed under SilentMode automation — don't retry, look for a differently-named sibling.",
+    "Never set .Name/instance_name on a stock/BOM catalog part (breaks auto BOM-length naming PERMANENTLY). Safe on assembly/grouping container nodes (AssembleElements groups, ironcad_connect_parts assemblies) — renaming those does not affect children's own names.",
+    "Before assuming a drawing's stated profile size (e.g. '45mm') has a catalog match, check PIL_DIST's actual stock size list — pick the closest available, note the substitution to the user, and recompute rail lengths from the drawing's real OVERALL envelope, not the nominal rail length (the profile-width delta changes how much each rail must be shortened to preserve that envelope)."
+  ]
+}

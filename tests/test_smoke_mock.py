@@ -6,6 +6,7 @@ detection, and the stdout-redirect guard. We deliberately do not deep-mock ICAPI
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import sys
@@ -128,6 +129,227 @@ def test_backup_copies_saved_file(monkeypatch, tmp_path):
     assert "b150004_221" in os.path.basename(dst) and dst.endswith(".ics")
 
 
+def test_backup_same_second_does_not_overwrite(monkeypatch, tmp_path):
+    src = tmp_path / "part.ics"
+    src.write_bytes(b"BEFORE-SAVE")
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_DIR", str(tmp_path / "bk"))
+    monkeypatch.setattr(safety, "_timestamp", lambda: "20260924_120000")
+    first = safety.backup_active_doc(str(src))
+    src.write_bytes(b"AFTER-SAVE")
+    second = safety.backup_active_doc(str(src))
+    assert first != second
+    with open(first, "rb") as f:
+        assert f.read() == b"BEFORE-SAVE"
+    # Suffixed name still sorts after the unsuffixed one (prune order).
+    assert sorted([second, first]) == [first, second]
+
+
+# ---- backup retention + write-audit trail (Phase 7.2/7.3) ---------------
+
+def test_backup_retention_prunes_oldest(monkeypatch, tmp_path):
+    src = tmp_path / "part.ics"
+    src.write_bytes(b"ICS-DATA")
+    bdir = tmp_path / "bk"
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_DIR", str(bdir))
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_RETENTION_COUNT", "3")
+    paths = []
+    for i in range(5):
+        # Force distinct timestamps so filenames (and thus prune ordering) differ.
+        monkeypatch.setattr(
+            safety, "_timestamp", lambda i=i: f"2026010{i}_000000"
+        )
+        paths.append(safety.backup_active_doc(str(src)))
+    existing = [p for p in paths if os.path.isfile(p)]
+    assert len(existing) == 3, f"expected exactly 3 backups retained, found {len(existing)}"
+    # The 3 most recent (highest timestamp) must be the ones kept.
+    assert set(existing) == set(paths[-3:])
+
+
+def test_backup_retention_disabled_at_zero(monkeypatch, tmp_path):
+    src = tmp_path / "part.ics"
+    src.write_bytes(b"ICS-DATA")
+    bdir = tmp_path / "bk"
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_DIR", str(bdir))
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_RETENTION_COUNT", "0")
+    paths = []
+    for i in range(4):
+        monkeypatch.setattr(safety, "_timestamp", lambda i=i: f"2026020{i}_000000")
+        paths.append(safety.backup_active_doc(str(src)))
+    assert all(os.path.isfile(p) for p in paths), "retention=0 must disable pruning"
+
+
+def test_write_audit_log_records_backup(monkeypatch, tmp_path):
+    import json as _json
+
+    src = tmp_path / "part.ics"
+    src.write_bytes(b"ICS-DATA")
+    bdir = tmp_path / "bk"
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_DIR", str(bdir))
+    dst = safety.backup_active_doc(str(src), action="ironcad_add_catalog_part")
+    audit_path = bdir / "audit.log.jsonl"
+    assert audit_path.is_file()
+    lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
+    last = _json.loads(lines[-1])
+    assert last["backup_path"] == dst
+    assert last["action"] == "ironcad_add_catalog_part"
+    assert last["source"] == str(src)
+
+
+def test_write_audit_log_records_unsaved_scene(monkeypatch, tmp_path):
+    import json as _json
+
+    bdir = tmp_path / "bk"
+    bdir.mkdir()
+    monkeypatch.setenv("IRONCAD_MCP_BACKUP_DIR", str(bdir))
+    result = safety.backup_active_doc("Scene1", action="ironcad_build_parts")
+    assert result is None
+    audit_path = bdir / "audit.log.jsonl"
+    assert audit_path.is_file()
+    last = _json.loads(audit_path.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert last["backup_path"] is None
+    assert last["action"] == "ironcad_build_parts"
+
+
+# ---- new typed errors (Phase 4.1) ----------------------------------------
+
+def test_new_error_types_are_runtime_errors():
+    assert issubclass(safety.GeometryError, RuntimeError)
+    assert issubclass(safety.ComUnavailableError, RuntimeError)
+    assert issubclass(safety.UnsupportedCatalogPart, RuntimeError)
+
+
+# ---- COM worker watchdog (Phase 4.3) -------------------------------------
+
+def test_com_worker_timeout_raises_com_unavailable(monkeypatch):
+    import time as _time
+
+    from ironcad_mcp import com_worker
+
+    monkeypatch.setenv("IRONCAD_MCP_COM_TIMEOUT_S", "0.2")
+    worker = com_worker.ComWorker(name="test-timeout-worker")
+    worker.start()
+    try:
+        def slow():
+            _time.sleep(2.0)
+            return "done"
+
+        async def go():
+            return await worker.run(slow)
+
+        with pytest.raises(com_worker.ComWorkerError):
+            asyncio.run(go())
+    finally:
+        # The worker thread is still blocked in time.sleep(2.0); give it a
+        # moment to finish naturally before stopping (stop() joins with its
+        # own timeout and won't hang the test suite either way).
+        worker.stop(timeout=3.0)
+
+
+def test_com_worker_timeout_disabled_at_zero(monkeypatch):
+    from ironcad_mcp import com_worker
+
+    monkeypatch.setenv("IRONCAD_MCP_COM_TIMEOUT_S", "0")
+    worker = com_worker.ComWorker(name="test-notimeout-worker")
+    worker.start()
+    try:
+        async def go():
+            return await worker.run(lambda: "fast result")
+
+        assert asyncio.run(go()) == "fast result"
+    finally:
+        worker.stop(timeout=3.0)
+
+
+# ---- spec schema validation (Phase 5) ------------------------------------
+
+def test_valid_spec_passes():
+    from ironcad_mcp.spec_schema import validate_spec
+
+    spec = {
+        "source_drawing": "x.pdf",
+        "overall_envelope_mm": {"x": 1, "y": 2, "z": 3},
+        "bom": [{"item_id": 1, "role": "post", "qty": 4,
+                  "catalog_match": {"status": "resolved", "catalog": "PIL_DIST",
+                                     "entry_name": "PIL4040SNN_"}}],
+        "confidence": "high",
+    }
+    assert validate_spec(spec) == []
+
+
+def test_incomplete_spec_lists_missing_required_fields():
+    from ironcad_mcp.spec_schema import validate_spec
+
+    errors = validate_spec({"source_drawing": "x.pdf"})
+    assert any("overall_envelope_mm" in e for e in errors)
+    assert any("bom" in e for e in errors)
+    assert any("confidence" in e for e in errors)
+
+
+def test_unresolved_bom_item_requires_why():
+    from ironcad_mcp.spec_schema import validate_spec
+
+    spec = {
+        "source_drawing": "x.pdf",
+        "overall_envelope_mm": {"x": 1, "y": 2, "z": 3},
+        "bom": [{"item_id": 1, "role": "bracket", "qty": 1,
+                  "catalog_match": {"status": "unresolved"}}],
+        "confidence": "low",
+    }
+    errors = validate_spec(spec)
+    assert any("why_unresolved" in e for e in errors)
+
+
+def test_validate_spec_tool_end_to_end(tmp_path):
+    import json as _json
+
+    from ironcad_mcp.server import mcp as _mcp
+
+    spec = {
+        "source_drawing": "x.pdf",
+        "overall_envelope_mm": {"x": 1, "y": 2, "z": 3},
+        "bom": [{"item_id": 1, "role": "post", "qty": 1,
+                  "catalog_match": {"status": "resolved", "catalog": "PIL_DIST",
+                                     "entry_name": "PIL4040SNN_"}}],
+        "confidence": "high",
+    }
+    spec_path = tmp_path / "drawing.spec.json"
+    spec_path.write_text(_json.dumps(spec), encoding="utf-8")
+
+    tool = _mcp._tool_manager.get_tool("ironcad_validate_spec")
+    result = asyncio.run(tool.run({"spec_path": str(spec_path)}, convert_result=False))
+    assert result["valid"] is True
+    assert result["errors"] == []
+    assert result["spec"]["bom"][0]["role"] == "post"
+
+
+# ---- catalog manifest (Phase 6) ------------------------------------------
+
+def test_catalog_manifest_loads_and_has_known_catalogs():
+    from ironcad_mcp.catalog_manifest import get_catalog, load_manifest
+
+    manifest = load_manifest()
+    assert "PIL_DIST" in manifest["catalogs"]
+    assert "PAN_DIST" in manifest["catalogs"]
+    pan = get_catalog("pan_dist")  # case-insensitive
+    assert pan is not None
+    assert "entries" in pan
+
+
+def test_catalog_manifest_tool_full_and_scoped(tmp_path):
+    from ironcad_mcp.server import mcp as _mcp
+
+    tool = _mcp._tool_manager.get_tool("ironcad_get_catalog_manifest")
+    full = asyncio.run(tool.run({}, convert_result=False))
+    assert "PIL_DIST" in full["catalogs"]
+
+    scoped = asyncio.run(tool.run({"catalog": "PIL_DIST"}, convert_result=False))
+    assert scoped["found"] is True
+    assert scoped["data"]["purpose"]
+
+    missing = asyncio.run(tool.run({"catalog": "NoSuchCatalog"}, convert_result=False))
+    assert missing["found"] is False
+
+
 # ---- registration-error detection --------------------------------------
 
 def test_registration_error_detection():
@@ -151,14 +373,16 @@ def test_all_tools_and_prompt_register():
         "ironcad_get_anchor", "ironcad_get_part_bbox", "ironcad_check_interference",
         "ironcad_capture_view", "ironcad_list_catalogs", "ironcad_list_catalog_parts",
         "ironcad_get_catalog_part_info", "ironcad_add_catalog_part",
-        "ironcad_build_parts",
+        "ironcad_build_parts", "ironcad_list_children",
+        "ironcad_add_catalog_assembly", "ironcad_build_panel",
+        "ironcad_get_catalog_manifest", "ironcad_validate_spec",
         "ironcad_set_part_parameter", "ironcad_move_part", "ironcad_set_anchor",
         "ironcad_connect_parts",
         "ironcad_save", "ironcad_save_copy", "ironcad_execute_api_script",
     }
     assert expected <= tools, f"missing tools: {expected - tools}"
     prompts = {p.name for p in asyncio.run(mcp.list_prompts())}
-    assert "build_from_sketch" in prompts
+    assert {"build_from_sketch", "interpret_drawing"} <= prompts
 
 
 def test_redirect_stdout_to_stderr_object_fallback(monkeypatch, capsys):

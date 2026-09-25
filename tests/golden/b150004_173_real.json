@@ -1,0 +1,26 @@
+{
+  "source_file": "C:\\Users\\admin\\Desktop\\Kelvin\\NORTION\\b150004_173.ics",
+  "generated": "2026-09-24",
+  "generated_by": "scripts/generate_golden_snapshot.py pattern (Phase 3.2)",
+  "top_level_part_count": 18,
+  "leaf_part_count": 58,
+  "envelope_in": [
+    27.085,
+    42.7,
+    44.268
+  ],
+  "envelope_tolerance_in": 0.05,
+  "bom_histogram": {
+    "PIL4140SNN42.24": 4,
+    "PIL4140SNN26.77": 4,
+    "PIL4140SNN17.89": 2,
+    "FAS4041": 12,
+    "CAP4041": 8,
+    "CAN4501": 12,
+    "CAL4515SNN____": 12,
+    "Polycarbonatglas 4-6mm PAN____P_N____": 3,
+    "PIL4140SNN5.75": 1
+  },
+  "clash_count": 229,
+  "clash_count_note": "expected clashes are internal hardware overlaps inside compound catalog assemblies (fasteners/connectors clamping onto their own panel/rail by design) plus the documented panel-recessed-into-slot AABB overlap -- see ironcad-mcp-project memory. Not zero by design; treat an INCREASE beyond this snapshot's count as the signal, not a nonzero count itself."
+}
